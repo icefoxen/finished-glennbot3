@@ -1,0 +1,401 @@
+module Irc where
+import Data.List
+import Data.Char
+import Data.Maybe
+import qualified Data.Map as Map
+import qualified Data.Set as Set
+import Network
+import System.IO
+import Text.Printf
+import Data.Time.LocalTime
+
+import IrcParse
+
+
+-- SERVER STRUCTURE AND MISC USEFUL FUNCTIONS ON IT.
+
+data Server = Server
+   {sname :: String,
+    port :: Integer,
+    socket :: Handle,
+    snick :: String,
+    bufflen :: Int,
+    channels :: Map.Map String Channel}
+
+data Channel = Channel
+  {users  :: Set.Set String, 
+   buffer :: [String]}
+
+emptyChannel :: Channel
+emptyChannel = Channel {users = Set.empty, buffer = []}
+
+bufferLength :: Int
+bufferLength = 500
+
+dataPath :: String
+dataPath = "data/"
+logPath :: String
+logPath = dataPath ++ "log/"
+
+logString :: Message -> String
+logString (M(Just(PHostmask (H(who,_,_))), m)) =
+   case m of 
+      Join s -> who ++ " joined " ++ s
+      Nick s -> who ++ " is now known as " ++ s
+      Topic chan top -> who ++ " changed the topic of " ++ chan ++ " to " ++ top
+      Quit s -> who ++ " has quit: " ++ s
+      Part chan s -> who ++ " has left " ++ chan ++ ": " ++ s
+      Kick chan user message -> who ++ " has kicked " ++ user ++ " from " ++ chan ++ ": " ++ message
+      Privmsg chan s -> "<" ++ who ++ "> " ++ s
+      --Error s -> "ERROR: " ++ s
+      _ -> ""
+logString _ = "" -- show m
+
+logToChannel :: Message -> String -> Channel -> IO ()
+logToChannel message name chan = do
+
+log :: Message -> Server -> IO ()
+log message server = do
+   t <- getZonedTime
+   let now = show t
+   let str = logString message
+   let filename = logPath ++ logfile ++ "-" ++ now
+   if str /= "" then appendFile logfile (show now ++ " " ++ str)
+      else return ()
+
+-- Makes a new server object connected to the given server
+connect :: String -> Integer -> String -> IO Server
+connect server port nick = do
+   printf "Connecting to %s:%d..." server port
+   h <- connectTo server $ PortNumber (fromIntegral port)
+   hSetBuffering h NoBuffering
+   putStrLn "Done."
+   return $ Server {sname=server, port=port, socket=h, snick=nick, channels=Map.empty,bufflen=bufferLength}
+
+-- Send a raw message
+send :: Server -> Messagebody -> IO ()
+send s m = do
+    --printf "SENDING: %s\n" $ show m
+    hPrintf (socket s) "%s\r\n" $ show m
+
+-- Get and parse a message
+listen :: Server -> IO Message
+listen s = do
+   str <- hGetLine (socket s)
+   return $ parseMessage str
+   
+-- Send login info.
+logOn :: Server -> IO ()
+logOn s =
+   let n = snick s in do
+   send s $ Nick n
+   -- Hostname and servername are generally ignored from clients.
+   send s $ User n "hostname" "servername" "Glennbot"
+
+-- Does exactly what it says on the tin
+changeNick :: Server -> String -> IO Server
+changeNick s n = do
+   send s $ Nick n
+   return $ s {snick=n}
+
+-- Joins a channel and creates a new channel object in the server
+-- XXX: Can we check whether we're really in the channel?
+join :: Server -> String -> IO Server
+join s str =
+   if str `Map.member` (channels s) then return s
+   else do
+      send s $ Join str -- [(str,"")]
+      return $ s {channels=Map.insert str emptyChannel (channels s)}
+
+-- Leaves a channel and removes it from the server
+part :: Server -> String -> String -> IO Server 
+part s str msg = do
+   send s $ Part str msg
+   return $ s {channels=Map.delete str (channels s)}
+
+-- Bloody 512 character limit for messages.
+-- XXX: We're going to be a tad conservative instead of Doing It Right.
+-- The 512 limit is for the _whole message_, not just its arguments
+-- or last argument or anything.
+listMaxLength :: Int -> [a] -> [[a]]
+listMaxLength len lst =
+   let loop lst accm =
+         if (length lst) > len then
+            let (hd,tl) = splitAt len lst in
+            loop tl (hd : accm)
+         else
+            lst : accm
+   in
+   reverse $ loop lst []
+
+-- Send a privmsg
+-- XXX: Log it!
+-- XXX: Handle max length better!
+say :: Server -> String -> String -> IO ()
+say s to msg =
+   let strings = listMaxLength 480 msg in
+   let messages = map (\s -> Privmsg to s) strings in do
+   let nick = (snick s)
+   let fullmessages = map (\m -> (M(Just(PHostmask (H(nick,"",""))), m))) messages
+   mapM_ (\msg -> Irc.log msg to) fullmessages
+   mapM_ (\msg -> send s $ msg) messages
+
+
+-- Send an action
+-- XXX: Implement
+--action :: Server -> String -> String -> IO ()
+--action s str act =
+--   send s $ Action {from="", to=str, msg=act}
+
+addUser :: Channel -> String -> Channel
+addUser chan user =
+   chan { users=Set.insert user (users chan) }
+
+delUser :: Channel -> String -> Channel
+delUser chan user =
+   chan { users=Set.delete user (users chan) }
+
+-- Renames are global
+-- Channel, oldnick, newnick
+renameUser :: Channel -> String -> String -> Channel
+renameUser chan old new =
+   let u = Set.delete old (users chan) in
+   chan { users=Set.insert new u }
+
+-- XXX: O(N), which could be better, but...
+addToBuffer :: Channel -> String -> Int -> Channel
+addToBuffer chan msg buflen =
+   let b = msg : (buffer chan) in
+   chan { buffer = take buflen b } 
+
+adjustChannelS :: Server -> String -> (Channel -> Channel) -> Server
+adjustChannelS s chan fn =
+   let c = Map.adjust (\ch -> fn ch) chan (channels s) in
+   s { channels = c }
+
+addUserS :: Server -> String -> String -> Server
+addUserS server chan user =
+   adjustChannelS server chan (\c -> addUser c user)
+
+delUserS :: Server -> String -> String -> Server
+delUserS server chan user =
+   adjustChannelS server chan (\c -> delUser c user)
+
+renameUserS :: Server -> String -> String -> Server
+renameUserS server old new =
+   server { channels = Map.map (\c -> renameUser c old new) (channels server) }
+
+addToBufferS :: Server -> String -> String -> Server
+addToBufferS server chan msg =
+   adjustChannelS server chan (\c -> addToBuffer c msg (bufflen server))
+
+getBufferS :: Server -> String -> [String]
+getBufferS serv chan = do
+   let c = Map.lookup chan (channels serv)
+   case c of
+      Just n -> (buffer n)
+      Nothing -> []
+   
+printBufferLength :: Server -> String -> IO ()
+printBufferLength serv chan =
+   putStrLn $ "Buffer length: " ++ (show (length (getBufferS serv chan)))
+   
+-- For testing!
+--a = "NOTICE Glennbot :will originate from proxyscan.rizon.net (174.143.233.88). For"
+--b = ":py-bopm!python@proxyscan.rizon.net NOTICE Glennbot :will originate from proxyscan.rizon.net (174.143.233.88). For"
+
+
+-- MESSAGE LOOP AND STRUCTURE
+type MessageHandler = Message -> Bot -> IO Bot
+type Dataset = Map.Map String (Map.Map String String)
+data Bot = Bot
+   {handlers :: [MessageHandler],
+    server :: Server,
+    dataset :: Dataset
+   }
+
+addHandler :: MessageHandler -> Bot -> Bot
+addHandler h bot =
+   bot {handlers = h : (handlers bot)}
+
+addHandlers :: [MessageHandler] -> Bot -> Bot
+addHandlers hs bot =
+   bot {handlers = hs ++ (handlers bot)}
+
+applyHandlers :: Message -> [MessageHandler] -> Bot -> IO Bot
+applyHandlers message [] bot = do 
+   return bot
+applyHandlers message (handler:rest) bot = do
+   b <- handler message bot
+   applyHandlers message rest b
+
+handle :: Message -> Bot -> IO Bot
+handle m bot =
+   applyHandlers m (handlers bot) bot
+
+getDataset :: Bot -> String -> Maybe (Map.Map String String)
+getDataset bot set =
+   Map.lookup set (dataset bot)
+
+getData :: Bot -> String -> String -> Maybe String
+getData bot set item =
+   let n = getDataset bot set in
+   case n of
+      Nothing -> Nothing
+      Just s -> Map.lookup item s
+
+addDataset :: Bot -> String -> Bot
+addDataset bot set =
+   case getDataset bot set of
+      Nothing -> 
+         let ds = Map.insert set Map.empty (dataset bot) in
+            bot {dataset = ds}
+      Just _ -> bot
+
+addData :: Bot -> String -> String -> String -> Bot
+addData bot set key val =
+   case getDataset bot set of
+      Nothing -> addData (addDataset bot set) set key val
+      Just s -> 
+         let ns = Map.insert key val s
+             nd = Map.insert set ns (dataset bot)
+            in bot {dataset=nd}
+
+delData :: Bot -> String -> String -> Bot
+delData bot set key =
+   case getDataset bot set of
+      Nothing -> bot
+      Just s -> let ns = Map.delete key s in
+         let nd = Map.insert set ns (dataset bot) in
+         bot {dataset=nd}
+
+dumpDataToFile :: Dataset -> String -> IO ()
+dumpDataToFile ds file =
+   writeFile file $ show ds
+
+readDataFromFile :: String -> IO Dataset
+readDataFromFile file = do
+   ds <- readFile file
+   return $ read ds
+
+
+
+
+pingHandler :: MessageHandler
+pingHandler (M(_,(Ping msg))) bot = do
+   let serv = (server bot)
+   send serv $ Pong (sname serv) msg
+   --say serv "#bottest" "Pong'ed."
+   let c = bot {server = serv}
+   return c
+pingHandler _ stuff = do return stuff
+
+verboseHandler :: MessageHandler
+verboseHandler msg stuff = do
+   putStrLn $ show msg
+   return stuff
+
+sayUsers :: Server -> IO ()
+sayUsers s = do
+   let chan = (channels s) Map.! "#bottest"
+   let u = Set.elems (users chan)
+   mapM_ (\u -> say s "#bottest" $ "User: " ++ u) u
+   say s "#bottest" "foo"
+
+-- Yay for ugly pattern matching!
+nickChangeHandler :: MessageHandler
+nickChangeHandler (M(Just(PHostmask (H(nick,_,_))),Nick name)) bot = do
+   let serv = server bot
+   let s = renameUserS serv nick name
+   --sayUsers s
+   let c = bot {server = s}
+   return c
+nickChangeHandler _ s = do return s
+
+joinHandler :: MessageHandler
+joinHandler (M(Just(PHostmask (H(nick,_,_))),Join chan)) bot = do
+   let serv = server bot
+   let s = addUserS serv chan nick
+   --sayUsers s
+   let c = bot {server = s}
+   return c
+joinHandler _ s = do return s
+
+partHandler :: MessageHandler
+partHandler (M(Just(PHostmask (H(nick,_,_))),Part chan message)) bot = do
+   let serv = server bot
+   let s = delUserS serv chan nick
+   --sayUsers s
+   let c = bot {server = s}
+   return c
+partHandler _ s = do return s
+
+sayHandler :: MessageHandler
+sayHandler (M(Just(PHostmask (H(nick,_,_))),Privmsg to msg)) bot = do
+   let serv = server bot
+   t <- getZonedTime
+   let now = show t
+   let s = 
+         if (to !! 0) == '#' then
+            addToBufferS serv to (now ++ " " ++ nick ++ ": " ++ msg)
+         else serv
+   let c = bot {server = s}
+   return c
+sayHandler _ s = do return s
+
+errorHandler :: MessageHandler
+errorHandler (M(from,Error msg)) stuff = do
+   putStrLn "ERROR:"
+   putStrLn $ show $ M (from, Error msg)
+   return stuff
+errorHandler _ s = return s
+
+defaultHandlers :: [MessageHandler]
+defaultHandlers = [
+   pingHandler,
+   sayHandler,
+   joinHandler,
+   partHandler,
+   nickChangeHandler,
+   errorHandler
+   ]
+
+
+makeSay :: (String -> String -> String -> Bot -> IO Bot) -> MessageHandler
+makeSay func =
+   \m bot ->
+   case m of
+      (M(Just(PHostmask (H(from,_,_))),Privmsg to msg)) ->
+         func from to msg bot
+      _ -> return bot
+
+makeJoin :: (String -> String -> Bot -> IO Bot) -> MessageHandler
+makeJoin func =
+   \(M(Just(PHostmask (H(who,_,_))),Join chan)) bot ->
+    func who chan bot
+
+makePart :: (String -> String -> String -> Bot -> IO Bot) -> MessageHandler
+makePart func =
+   \(M(Just(PHostmask (H(who,_,_))),Part chan message)) bot ->
+    func who chan message bot
+
+echo :: MessageHandler
+echo = 
+   makeSay (\from to msg bot -> do
+         putStrLn ("Got message: " ++ msg)
+         let s = server bot
+         say s to msg
+         return bot)
+   
+echoLog :: MessageHandler
+echoLog message bot = do
+   say (server bot) "#bottest" $ logString message
+   return bot
+   
+
+extendedHandlers :: [MessageHandler]
+extendedHandlers = defaultHandlers ++ [
+   echo,
+   echoLog,
+   verboseHandler
+   ]

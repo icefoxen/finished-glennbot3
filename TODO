@@ -1,0 +1,159 @@
+Okay, it's time to actually come up with design decisions.
+
+Parameters...
+$from $text $now $time $me
+Say, action, privatereply
+Various user-defined data... either key-value or key-manyvalues
+$name would be a key-manyvalue.  $person would be too.
+Can values be tuples?
+
+How do I want these things to work?
+
+Memo for Foo: text
+Memo for foo, bar and bop: text
+Memo foo, bar, bop: text
+What are my memos?
+Memo me: stuff
+memo self: blah
+Check my memos without deleting them.
+Check and preserve my memos
+
+Keep note: ...
+Note named foo: bar
+What is note foo?
+What is note 37?
+What notes do I have?
+Delete note
+Edit note (replace)
+
+Kill x
+Really kill x
+New kill: $person $weapon
+List kills
+List kill X
+Delete kill X
+Edit kill X: (replace)
+
+Join channel
+Leave channel
+Die
+
+Random action
+Remove random action
+Add random action
+Vote up/vote down? (botsnack and newspaper?)
+
+Random link
+Labelled link
+Add/remove/edit link
+Remember any link said
+Add gmail-style labels/tags for links?
+
+Backlog
+Backlog N
+
+Unit conversion
+
+Roll
+Roll 2d6+4
+Roll 7
+
+nslookup
+reverse lookup
+MX, SRV, etc lookup
+Ping
+
+Add authorized user
+Delete authorized user
+
+Help
+
+give/take
+Remember last line from someone
+
+Race and class
+
+Simple responses:
+Hug
+stab
+kill
+high five
+Botsnack
+newspaper
+D:
+...
+skynet/shodan/HAL/etc
+
+
+
+
+Handle topic?
+Bot status -- data status, uptime, etc
+
+Calculate (including functions)
+
+Word of the day (CRUD)
+
+Music server status?  Playlist management?  Add files???
+
+Random decision maker (!xom)
+
+State machines tied to specific people
+
+Haiku generator
+
+Question answerer
+
+Retrieve logs/backlog
+
+
+
+
+
+Core functionality
+Ignore delayed messages (XEP-0203 and 0091)
+Log
+Data files
+Chat/channel management
+
+Groupchat presence actions (nick change, kick, ban, role change)
+
+What do I want it to do:
+Keep memos
+Issue kills in a vaguely-flexible way.
+Keep logs
+Have commands to join and leave a channel that can be issued in a different
+channel.
+Remember and produce random actions and links
+Ignore multiple kills and actions
+Offer backlog
+Roll dice
+Random names
+nslookup, nslookup reverse, mx, AAAA
+Ping, traceroute, etc.
+
+How I want it to do things:
+Keep memos between servers
+Have authorized users and commands
+Have simple commands.
+Have a self-documenting help command.
+Be able to take and reply to commands in private messages
+Reply to certain spammy commands only in private messages
+
+What I might want it to do:
+Run multiple servers in one instance
+Treat anyone with channel ops/halfops as an authorized user.
+Be able to perform admin tasks --kick, ban, unban people.
+Remember specific bits of information until told to forget them.
+Memo multiple people
+Handle topic?
+Remember word of the day, with dictionary
+Let users adjust/correct data files (weapons, etc)
+Interface with Google Calculator?
+Detect typos and offer corrections
+Bot status.  Uptime, etc.
+Music server status
+Brainfuck interpreter
+Paul-style curse generator
+Haiku generator
+Random decision maker
